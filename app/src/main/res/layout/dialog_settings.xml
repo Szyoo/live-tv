@@ -24,7 +24,7 @@
         android:id="@+id/source_input"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="http://…/live.m3u"
+        android:hint="留空则使用内置清单"
         android:imeOptions="actionDone"
         android:nextFocusDown="@id/btn_save"
         android:importantForAutofill="no"
@@ -32,6 +32,14 @@
         android:singleLine="true"
         android:textColor="@android:color/white"
         android:textSize="22sp" />
+
+    <TextView
+        android:id="@+id/source_current"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:textColor="#99FFFFFF"
+        android:textSize="16sp" />
 
     <TextView
         android:id="@+id/version_text"

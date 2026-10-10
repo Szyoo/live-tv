@@ -13,9 +13,6 @@ android {
         versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 2
         versionName = (project.findProperty("versionName") as String?) ?: "0.2.0"
 
-        val sourceUrl = (project.findProperty("defaultSourceUrl") as String?) ?: ""
-        buildConfigField("String", "DEFAULT_SOURCE_URL", "\"" + sourceUrl.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
-
         val updateUrl = (project.findProperty("updateUrl") as String?)
             ?: "https://github.com/Szyoo/live-tv/releases/latest/download/update.json"
         buildConfigField("String", "UPDATE_URL", "\"" + updateUrl.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")

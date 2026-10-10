@@ -14,6 +14,7 @@ import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.TextClock
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -194,11 +195,6 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private fun startUp() {
         if (loading) return
         val url = prefs.sourceUrl
-        if (url.isBlank()) {
-            showStatus("尚未设置频道源地址\n请在设置中填写")
-            showSettings()
-            return
-        }
         loading = true
         showStatus("正在加载频道清单…")
         spinner.visibility = View.VISIBLE
@@ -207,9 +203,13 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             val r = loader.load(url)
             handler.post {
                 loading = false
-                r.onSuccess { pl ->
+                r.onSuccess { res ->
+                    val pl = res.playlist
                     playlist = pl
-                    Log.i(TAG, "playlist loaded: ${pl.channels.size} channels")
+                    Log.i(TAG, "playlist loaded: ${pl.channels.size} channels (${res.source})")
+                    if (res.source == PlaylistLoader.Source.FALLBACK_BUILTIN) {
+                        Toast.makeText(this, "自定义源加载失败，已改用内置清单", Toast.LENGTH_LONG).show()
+                    }
                     if (controller != null) resume(pl)
                 }.onFailure { e ->
                     Log.e(TAG, "playlist load failed", e)
@@ -438,6 +438,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         val input = v.findViewById<EditText>(R.id.source_input)
         input.setText(prefs.sourceUrl)
         input.setSelection(input.text.length)
+        v.findViewById<TextView>(R.id.source_current).text =
+            if (prefs.sourceUrl.isBlank()) "当前：内置清单" else "当前：自定义地址"
         v.findViewById<TextView>(R.id.version_text).text = "版本 ${BuildConfig.VERSION_NAME}"
         val dlg = AlertDialog.Builder(this).setView(v).create()
         v.findViewById<Button>(R.id.btn_save).setOnClickListener {
@@ -452,15 +454,10 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         }
         v.findViewById<Button>(R.id.btn_cancel).setOnClickListener { dlg.dismiss() }
         settingsDialog = dlg
-        if (prefs.sourceUrl.isNotBlank()) {
-            // 已有源地址：焦点放在「重新加载清单」，不自动弹键盘；移到输入框按确认才弹
-            dlg.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
-            dlg.show()
-            v.findViewById<Button>(R.id.btn_reload).requestFocus()
-        } else {
-            dlg.show()
-            input.requestFocus() // 首次使用：直接输入并弹键盘
-        }
+        // 焦点放在「重新加载清单」，不自动弹键盘；移到输入框按确认才弹
+        dlg.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
+        dlg.show()
+        v.findViewById<Button>(R.id.btn_reload).requestFocus()
     }
 
     // ---------- 自动更新 ----------
