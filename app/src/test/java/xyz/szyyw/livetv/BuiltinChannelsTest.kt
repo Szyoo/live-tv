@@ -18,8 +18,14 @@ class BuiltinChannelsTest {
 
     @Test fun eachChannelHasEnoughHttpStreams() {
         for (c in pl.channels) {
-            assertTrue("${c.name} 线路不足: ${c.streams.size}", c.streams.size >= 3)
-            for (s in c.streams) assertTrue("${c.name}: ${s.url}", s.url.startsWith("http://") || s.url.startsWith("https://"))
+            // 主看的 5 / 5+ 至少 4 条线路，其余台至少 1 条
+            val min = if (c.name == "CCTV-5" || c.name == "CCTV-5+") 4 else 1
+            assertTrue("${c.name} 线路不足: ${c.streams.size}", c.streams.size >= min)
+            for (s in c.streams) {
+                assertTrue("${c.name}: ${s.url}", s.url.startsWith("http://") || s.url.startsWith("https://"))
+                // 该服务器的频道编号会变（同一编号隔天换成别的台），不得收录
+                assertFalse("${c.name}: ${s.url}", s.url.contains("45.192.97.170"))
+            }
         }
     }
 
