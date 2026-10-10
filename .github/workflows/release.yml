@@ -18,6 +18,7 @@ jobs:
     env:
       VERSION_CODE: ${{ github.run_number }}
       VERSION_NAME: 0.3.${{ github.run_number }}
+      EXPECTED_CERT_SHA256: f128a1642a697d9c58a083e7fa0eb782c9f482d869e2b5094386447391a67bdb
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +35,20 @@ jobs:
       - name: Unit tests
         run: bash ./gradlew :app:testDebugUnitTest --no-daemon
 
+      - name: Check secrets
+        env:
+          S_KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          S_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          S_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          S_LIVE_DEFAULT_URL: ${{ secrets.LIVE_DEFAULT_URL }}
+        run: |
+          fail=0
+          for n in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS LIVE_DEFAULT_URL; do
+            v="S_$n"
+            if [ -z "${!v}" ]; then echo "::error::仓库 Secret $n 为空或未设置"; fail=1; fi
+          done
+          [ "$fail" = 0 ] || exit 1
+
       - name: Decode keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -47,11 +62,14 @@ jobs:
           LIVE_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           LIVE_DEFAULT_URL: ${{ secrets.LIVE_DEFAULT_URL }}
         run: |
-          bash ./gradlew :app:assembleRelease --no-daemon \
+          bash ./gradlew :app:assembleRelease --no-daemon -PrequireReleaseKey=true \
             -PversionCode="$VERSION_CODE" \
             -PversionName="$VERSION_NAME" \
             -PdefaultSourceUrl="$LIVE_DEFAULT_URL"
           cp app/build/outputs/apk/release/app-release.apk live-tv.apk
+
+      - name: Verify signing certificate
+        run: bash scripts/verify-apk-cert.sh live-tv.apk "$EXPECTED_CERT_SHA256"
 
       - name: Generate update.json
         run: |

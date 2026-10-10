@@ -30,6 +30,11 @@ android {
     val ksPass = System.getenv("LIVE_KEYSTORE_PASSWORD")
     val ksAlias = System.getenv("LIVE_KEY_ALIAS")
     val haveReleaseKey = !ksFile.isNullOrBlank() && !ksPass.isNullOrBlank() && !ksAlias.isNullOrBlank()
+    if (!haveReleaseKey && project.findProperty("requireReleaseKey") == "true") {
+        val missing = listOf("LIVE_KEYSTORE_FILE" to ksFile, "LIVE_KEYSTORE_PASSWORD" to ksPass, "LIVE_KEY_ALIAS" to ksAlias)
+            .filter { it.second.isNullOrBlank() }.joinToString { it.first }
+        throw GradleException("-PrequireReleaseKey=true 但签名环境变量缺失: $missing。拒绝退回 debug 签名。")
+    }
     if (haveReleaseKey) {
         signingConfigs.create("releaseKey") {
             storeFile = file(ksFile!!)
