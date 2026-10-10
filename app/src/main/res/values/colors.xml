@@ -1,0 +1,6 @@
+<resources>
+    <color name="row_focused">#FF1E88E5</color>
+    <color name="row_active">#55FFFFFF</color>
+    <color name="panel">#E6101820</color>
+    <color name="btn_normal">#FF555555</color>
+</resources>
