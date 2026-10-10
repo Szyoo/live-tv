@@ -34,6 +34,9 @@ import xyz.szyyw.livetv.playlist.Playlist
 import xyz.szyyw.livetv.ui.Row
 import xyz.szyyw.livetv.ui.RowAdapter
 import xyz.szyyw.livetv.ui.focusRow
+import xyz.szyyw.livetv.update.UpdateInfo
+import xyz.szyyw.livetv.update.Updater
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -72,6 +75,9 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private var lastBackAt = 0L
     private var settingsDialog: AlertDialog? = null
     private val numberInput = ChannelNumberInput()
+    private val updateExec = Executors.newSingleThreadExecutor()
+    private val updater by lazy { Updater(applicationContext, client) }
+    private var pendingApk: File? = null
 
     // 浮层数据
     private var groups: List<String> = emptyList()
@@ -129,6 +135,7 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             override fun handleOnBackPressed() = onBack()
         })
         applyDebugIntent(intent)
+        checkForUpdate()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -167,9 +174,19 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         controller = null
     }
 
+    override fun onResume() {
+        super.onResume()
+        val apk = pendingApk
+        if (apk != null && updater.canInstall()) {
+            pendingApk = null
+            updater.install(apk)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         io.shutdownNow()
+        updateExec.shutdownNow()
     }
 
     // ---------- 启动 / 加载 ----------
@@ -278,7 +295,14 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
                 KeyEvent.KEYCODE_DPAD_LEFT -> { focusGroupColumn(); return true }
                 KeyEvent.KEYCODE_DPAD_RIGHT -> { focusChannelColumn(); return true }
             }
-            return super.onKeyDown(keyCode, event) // 上下交给焦点导航
+            if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                // 首行按上 / 末行按下：停在原地，不让焦点跳到另一列
+                val rv = if (groupList.hasFocus()) groupList else channelList
+                val pos = currentFocus?.let { rv.findContainingViewHolder(it)?.bindingAdapterPosition } ?: -1
+                val last = (rv.adapter?.itemCount ?: 0) - 1
+                if (pos < 0 || (keyCode == KeyEvent.KEYCODE_DPAD_UP && pos == 0) || (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && pos == last)) return true
+            }
+            return super.onKeyDown(keyCode, event) // 其余上下交给焦点导航
         }
         when (keyCode) {
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> { stepChannel(-1); return true }
@@ -428,9 +452,79 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         }
         v.findViewById<Button>(R.id.btn_cancel).setOnClickListener { dlg.dismiss() }
         settingsDialog = dlg
-        dlg.show()
-        // 焦点先放在输入框，按确认弹出系统键盘
-        input.requestFocus()
+        if (prefs.sourceUrl.isNotBlank()) {
+            // 已有源地址：焦点放在「重新加载清单」，不自动弹键盘；移到输入框按确认才弹
+            dlg.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
+            dlg.show()
+            v.findViewById<Button>(R.id.btn_reload).requestFocus()
+        } else {
+            dlg.show()
+            input.requestFocus() // 首次使用：直接输入并弹键盘
+        }
+    }
+
+    // ---------- 自动更新 ----------
+
+    /** 每次启动在后台检查一次；失败一律静默。"以后再说"只对本次启动有效。 */
+    private fun checkForUpdate() {
+        val url = BuildConfig.UPDATE_URL
+        if (url.isBlank()) return
+        updateExec.execute {
+            val info = updater.check(url, BuildConfig.VERSION_CODE) ?: return@execute
+            Log.i(TAG, "update available: ${info.versionName} (${info.versionCode})")
+            runOnUiThread { if (!isFinishing && !isDestroyed) showUpdateDialog(info) }
+        }
+    }
+
+    private fun showUpdateDialog(info: UpdateInfo) {
+        val msg = buildString {
+            append("当前版本 ${BuildConfig.VERSION_NAME}，最新版本 ${info.versionName}")
+            if (info.notes.isNotBlank()) append("\n\n").append(info.notes)
+        }
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("发现新版本 ${info.versionName}")
+            .setMessage(msg)
+            .setPositiveButton("更新") { _, _ -> startDownload(info) }
+            .setNegativeButton("以后再说", null)
+            .show()
+        dlg.getButton(AlertDialog.BUTTON_POSITIVE).requestFocus()
+    }
+
+    private fun startDownload(info: UpdateInfo) {
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("正在下载 ${info.versionName}")
+            .setMessage("0%")
+            .setCancelable(false)
+            .setNegativeButton("取消") { _, _ -> updater.cancel() }
+            .show()
+        updateExec.execute {
+            try {
+                val f = updater.download(info) { p ->
+                    runOnUiThread { dlg.setMessage(if (p >= 0) "$p%" else "下载中…") }
+                }
+                Log.i(TAG, "update downloaded: ${f.length()} bytes")
+                runOnUiThread { dlg.dismiss(); installApk(f) }
+            } catch (e: Exception) {
+                Log.w(TAG, "update download failed", e)
+                runOnUiThread {
+                    dlg.dismiss()
+                    showHint("更新下载失败，请稍后重试或检查网络", 4000)
+                }
+            }
+        }
+    }
+
+    private fun installApk(f: File) {
+        if (updater.canInstall()) {
+            updater.install(f)
+        } else {
+            pendingApk = f
+            Log.i(TAG, "need unknown-sources permission")
+            showHint("请允许本应用安装未知应用，授权后按返回键继续安装", 5000)
+            if (!updater.openUnknownSourcesSettings()) {
+                showHint("此设备无法打开授权页面，请在系统设置中允许本应用安装未知应用", 6000)
+            }
+        }
     }
 
     // ---------- PlayerController.Listener ----------

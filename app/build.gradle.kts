@@ -10,15 +10,35 @@ android {
         applicationId = "xyz.szyyw.livetv"
         minSdk = 24
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 2
+        versionName = (project.findProperty("versionName") as String?) ?: "0.2.0"
 
         val sourceUrl = (project.findProperty("defaultSourceUrl") as String?) ?: ""
         buildConfigField("String", "DEFAULT_SOURCE_URL", "\"" + sourceUrl.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
 
+        val updateUrl = (project.findProperty("updateUrl") as String?)
+            ?: "https://github.com/Szyoo/live-tv/releases/latest/download/update.json"
+        buildConfigField("String", "UPDATE_URL", "\"" + updateUrl.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
+
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
+    }
+
+    // 签名：三个环境变量齐全才用正式签名，否则退回 debug 签名（仅本地测试）
+    val ksFile = System.getenv("LIVE_KEYSTORE_FILE")
+    val ksPass = System.getenv("LIVE_KEYSTORE_PASSWORD")
+    val ksAlias = System.getenv("LIVE_KEY_ALIAS")
+    val haveReleaseKey = !ksFile.isNullOrBlank() && !ksPass.isNullOrBlank() && !ksAlias.isNullOrBlank()
+    if (haveReleaseKey) {
+        signingConfigs.create("releaseKey") {
+            storeFile = file(ksFile!!)
+            storePassword = ksPass
+            keyAlias = ksAlias
+            keyPassword = ksPass
+        }
+    } else {
+        logger.warn("********** WARNING: LIVE_KEYSTORE_FILE/LIVE_KEYSTORE_PASSWORD/LIVE_KEY_ALIAS 未设置，release 使用 DEBUG 签名（不可发布） **********")
     }
 
     buildTypes {
@@ -26,8 +46,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // 第三期换正式签名；目前临时用 debug 签名以便本地安装测试
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (haveReleaseKey) "releaseKey" else "debug")
         }
     }
 
@@ -55,4 +74,5 @@ dependencies {
     implementation(libs.recyclerview)
 
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303")
 }
