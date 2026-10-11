@@ -27,8 +27,8 @@
         android:layout_height="wrap_content"
         android:layout_marginStart="24dp"
         android:ellipsize="middle"
-        android:maxWidth="560dp"
+        android:maxWidth="600dp"
         android:singleLine="true"
         android:textColor="#FFFFD54F"
-        android:textSize="24sp" />
+        android:textSize="22sp" />
 </LinearLayout>

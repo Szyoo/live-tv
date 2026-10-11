@@ -32,6 +32,20 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;37.0.0"
 
+      - name: Check no stream URLs in repo
+        run: |
+          # 清单/线路地址不得进仓库：被跟踪文件（排除 *.kt/*.java、测试目录、本 workflow、.gitignore）里不许有 IP 形式的 http 地址或 .m3u8
+          hits=$(git grep -nIE 'https?://[0-9]{1,3}(\.[0-9]{1,3}){3}|\.m3u8' -- . \
+            ':(exclude)*.kt' ':(exclude)*.java' ':(exclude)*/src/test/*' ':(exclude).github/workflows/release.yml' ':(exclude).gitignore' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::仓库里发现疑似流地址（清单只能放本机，用 scripts/push-channels.sh 推送）："
+            echo "$hits"
+            exit 1
+          fi
+          # 被跟踪的清单文件（测试夹具除外）同样不允许
+          files=$(git ls-files '*.m3u' '*.m3u8' | grep -v '/src/test/' || true)
+          if [ -n "$files" ]; then echo "::error::仓库里有清单文件：$files"; exit 1; fi
+
       - name: Unit tests
         run: bash ./gradlew :app:testDebugUnitTest --no-daemon
 

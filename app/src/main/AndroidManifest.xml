@@ -40,6 +40,15 @@
             </intent-filter>
         </receiver>
 
+        <!-- 推送脚本发来的重新加载广播（显式组件广播）；不在前台时什么也不做 -->
+        <receiver
+            android:name=".ReloadReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="xyz.szyyw.livetv.RELOAD" />
+            </intent-filter>
+        </receiver>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

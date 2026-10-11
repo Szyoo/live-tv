@@ -37,6 +37,8 @@ import xyz.szyyw.livetv.logic.Dir
 import xyz.szyyw.livetv.logic.ExitMode
 import xyz.szyyw.livetv.logic.Failure
 import xyz.szyyw.livetv.logic.HorizontalMode
+import xyz.szyyw.livetv.logic.FileStamp
+import xyz.szyyw.livetv.logic.PlaylistSource
 import xyz.szyyw.livetv.logic.ResizeOption
 import xyz.szyyw.livetv.logic.Settings
 import xyz.szyyw.livetv.logic.StartMode
@@ -90,6 +92,9 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private var current: Channel? = null
     private var currentLine = 0
     private var loading = false
+    private var reloadAfterLoad = false
+    private var loadedUsesPushed = false
+    private var loadedStamp: FileStamp? = null
     private var pendingIdx: Int? = null
     private var lastBackAt = 0L
     private lateinit var settingsPanel: View
@@ -205,12 +210,16 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             mediaSession = MediaSessionHolder(applicationContext, it.player)
         }
         applyResize()
+        ReloadReceiver.foregroundHook = { reloadPlaylist() }
         val pl = playlist
-        if (pl != null) resume(pl) else startUp()
+        if (pl == null) startUp()
+        else if (pushedChanged()) { Log.i(TAG, "pushed playlist changed, reloading"); reloadPlaylist() }
+        else resume(pl)
     }
 
     override fun onStop() {
         super.onStop()
+        ReloadReceiver.foregroundHook = null
         handler.removeCallbacksAndMessages(null)
         pendingIdx = null
         numberInput.cancel()
@@ -227,6 +236,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
 
     override fun onResume() {
         super.onResume()
+        // onStart 之后再检查一次：从设置里装 APK 等场景回来只会走 onResume
+        if (playlist != null && !loading && pushedChanged()) { Log.i(TAG, "pushed playlist changed (resume), reloading"); reloadPlaylist() }
         val apk = pendingApk
         if (apk != null && updater.canInstall()) {
             pendingApk = null
@@ -243,6 +254,11 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
 
     // ---------- 启动 / 加载 ----------
 
+    private fun pushedChanged(): Boolean {
+        val now = PlaylistLoader.stampOf(PlaylistLoader.pushedFile(applicationContext))
+        return PlaylistSource.needsReload(loadedUsesPushed, loadedStamp, now)
+    }
+
     private fun startUp() {
         if (loading) return
         val url = prefs.sourceUrl
@@ -257,21 +273,34 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
                 r.onSuccess { res ->
                     val pl = res.playlist
                     playlist = pl
-                    Log.i(TAG, "playlist loaded: ${pl.channels.size} channels (${res.source})")
-                    if (res.source == PlaylistLoader.Source.FALLBACK_BUILTIN) {
-                        Toast.makeText(this, "自定义源加载失败，已改用内置清单", Toast.LENGTH_LONG).show()
+                    loadedUsesPushed = res.usesPushed
+                    loadedStamp = res.pushedStamp
+                    Log.i(TAG, "playlist loaded: ${pl.channels.size} channels, ${pl.channels.sumOf { it.streams.size }} lines (${res.source})")
+                    if (res.source == PlaylistLoader.Source.FALLBACK_PUSHED) {
+                        Toast.makeText(this, "自定义源加载失败，已改用推送的清单", Toast.LENGTH_LONG).show()
                     }
-                    if (controller != null) resume(pl)
+                    if (reloadAfterLoad) { reloadAfterLoad = false; reloadPlaylist() }
+                    else if (controller != null) resume(pl)
                 }.onFailure { e ->
-                    Log.e(TAG, "playlist load failed", e)
+                    playlist = null
+                    loadedUsesPushed = false
+                    loadedStamp = null
                     spinner.visibility = View.GONE
-                    showStatus("频道清单加载失败：${e.message ?: e.javaClass.simpleName}\n按「确认」长按或「菜单」键打开设置修改源地址")
+                    if (e is PlaylistLoader.NoPlaylistException) {
+                        Log.i(TAG, "no playlist: nothing pushed and no custom url")
+                        showStatus("${PlaylistSource.EMPTY_TITLE}\n${PlaylistSource.EMPTY_HINT}")
+                    } else {
+                        Log.e(TAG, "playlist load failed", e)
+                        showStatus("频道清单加载失败：${e.message ?: e.javaClass.simpleName}\n按「确认」长按或「菜单」键打开设置修改源地址")
+                    }
                 }
             }
         }
     }
 
+    /** 重新加载清单；当前频道靠 prefs.lastChannel 按名字匹配保持。 */
     private fun reloadPlaylist() {
+        if (loading) { reloadAfterLoad = true; return }
         handler.removeCallbacks(commitPending)
         pendingIdx = null
         playlist = null
@@ -522,6 +551,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
 
     private fun buildSettingsRows(): List<SRow> {
         val src = prefs.sourceUrl
+        val pushedStamp = PlaylistLoader.stampOf(PlaylistLoader.pushedFile(applicationContext))
+        val kind = PlaylistSource.choose(src, pushedStamp)
         val cur = current
         val startLabel = when (prefs.startMode) {
             StartMode.LAST -> StartMode.LAST.label
@@ -529,9 +560,9 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         }
         return listOf(
             SHeader("频道源"),
-            SItem("src_now", "当前来源", if (src.isBlank()) "内置清单" else "自定义地址", false),
-            SItem("src_edit", "修改源地址", if (src.isBlank()) "未设置（使用内置清单）" else src, false),
-            SItem("src_reset", "恢复内置清单", "", false),
+            SItem("src_now", "当前来源", PlaylistSource.label(kind, playlist?.channels?.size, pushedStamp), false),
+            SItem("src_edit", "修改源地址", if (src.isBlank()) "未设置（使用推送的清单）" else src, false),
+            SItem("src_reset", "清除自定义地址（改用推送的清单）", "", false),
             SItem("src_reload", "立即重新加载清单", "", false),
             SHeader("播放"),
             SItem("start", "启动时播放", startLabel, true),
@@ -587,12 +618,12 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             "src_now" -> {}
             "src_edit" -> showSourceDialog()
             "src_reset" -> {
-                if (prefs.sourceUrl.isBlank()) { Toast.makeText(this, "当前已是内置清单", Toast.LENGTH_SHORT).show() }
+                if (prefs.sourceUrl.isBlank()) { Toast.makeText(this, "当前没有自定义地址", Toast.LENGTH_SHORT).show() }
                 else {
                     prefs.sourceUrl = ""
-                    Log.i(TAG, "settings: reset to builtin playlist")
+                    Log.i(TAG, "settings: custom url cleared")
                     hideSettings(); reloadPlaylist()
-                    Toast.makeText(this, "已恢复内置清单", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "已清除自定义地址", Toast.LENGTH_SHORT).show()
                 }
             }
             "src_reload" -> { Log.i(TAG, "settings: reload playlist"); hideSettings(); reloadPlaylist() }
@@ -734,13 +765,11 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     }
 
     private fun showAbout() {
-        io.execute {
-            val b = runCatching { PlaylistLoader(applicationContext, client).loadBuiltin() }.getOrNull()
-            val info = if (b == null) "内置清单：读取失败" else
-                "内置清单：${b.channels.size} 个频道，共 ${b.channels.sumOf { it.streams.size }} 条线路"
-            val msg = "版本：${BuildConfig.VERSION_NAME}（versionCode ${BuildConfig.VERSION_CODE}）\n$info\nAndroid ${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）"
-            runOnUiThread { if (!isFinishing && !isDestroyed) showMessage("关于", msg) }
-        }
+        val pl = playlist
+        val info = if (pl == null) "当前清单：无" else
+            "当前清单：${pl.channels.size} 个频道，共 ${pl.channels.sumOf { it.streams.size }} 条线路"
+        val msg = "版本：${BuildConfig.VERSION_NAME}（versionCode ${BuildConfig.VERSION_CODE}）\n$info\nAndroid ${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）"
+        showMessage("关于", msg)
     }
 
     private fun manualCheckUpdate() {

@@ -17,7 +17,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
-        android:hint="留空则使用内置清单"
+        android:hint="留空则使用推送的清单"
         android:imeOptions="actionDone"
         android:nextFocusDown="@id/btn_save"
         android:importantForAutofill="no"

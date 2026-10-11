@@ -14,7 +14,7 @@ class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("live_tv", Context.MODE_PRIVATE)
     private val filesDir = context.filesDir
 
-    /** 用户保存的自定义源地址；空字符串表示使用内置清单。 */
+    /** 用户保存的自定义源地址；空字符串表示使用电脑推送的清单。 */
     var sourceUrl: String
         get() = sp.getString(KEY_SOURCE, null)?.trim().orEmpty()
         set(v) { sp.edit().putString(KEY_SOURCE, v).apply() }
