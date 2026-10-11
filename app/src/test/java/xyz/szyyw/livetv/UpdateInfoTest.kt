@@ -36,3 +36,17 @@ class UpdateInfoTest {
         assertFalse(i.isNewerThan(8))
     }
 }
+
+class UpdateEvaluateTest {
+    private val json = """{"versionCode":5,"versionName":"0.5.0","apk":"https://x/a.apk"}"""
+    @org.junit.Test fun newer() = org.junit.Assert.assertTrue(
+        xyz.szyyw.livetv.update.UpdateInfo.evaluate(json, 4) is xyz.szyyw.livetv.update.CheckResult.Newer)
+    @org.junit.Test fun upToDate() = org.junit.Assert.assertEquals(
+        xyz.szyyw.livetv.update.CheckResult.UpToDate, xyz.szyyw.livetv.update.UpdateInfo.evaluate(json, 5))
+    @org.junit.Test fun badFormat() = org.junit.Assert.assertTrue(
+        xyz.szyyw.livetv.update.UpdateInfo.evaluate("<html>", 1) is xyz.szyyw.livetv.update.CheckResult.Failed)
+    @org.junit.Test fun sizeFormat() {
+        org.junit.Assert.assertEquals("512 B", xyz.szyyw.livetv.data.CacheTools.format(512))
+        org.junit.Assert.assertEquals("1.5 MB", xyz.szyyw.livetv.data.CacheTools.format(1572864))
+    }
+}

@@ -31,6 +31,15 @@
             </intent-filter>
         </activity>
 
+        <!-- 媒体按键接收方占位：空实现，绝不启动 Activity -->
+        <receiver
+            android:name=".MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

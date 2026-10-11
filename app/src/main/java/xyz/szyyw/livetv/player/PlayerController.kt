@@ -22,7 +22,7 @@ import xyz.szyyw.livetv.playlist.Channel
 
 /**
  * 播放核心：ExoPlayer + OkHttp 数据源，按线路带请求头；
- * 出错或缓冲卡住超过 [STALL_TIMEOUT_MS] 自动切到同频道下一条线路，全部失败后停止并回调错误。
+ * 出错或缓冲卡住超过 [stallTimeoutMs] 自动切到同频道下一条线路，全部失败后停止并回调错误。
  * 无后缀地址若按渐进式加载时报"格式无法识别"，先按 HLS 对同一条线路重试一次。
  */
 class PlayerController(
@@ -38,6 +38,9 @@ class PlayerController(
     }
 
     val player: ExoPlayer = ExoPlayer.Builder(context).build()
+
+    /** 卡顿多久自动换线路（设置里可调，默认 12 秒）。 */
+    @Volatile var stallTimeoutMs: Long = DEFAULT_STALL_TIMEOUT_MS
     private val handler = Handler(Looper.getMainLooper())
 
     private var channel: Channel? = null
@@ -56,7 +59,7 @@ class PlayerController(
 
     private val stallRunnable = Runnable {
         val ch = channel ?: return@Runnable
-        Log.w(TAG, "buffering stalled > ${STALL_TIMEOUT_MS}ms on ${ch.name} line ${streamIndex + 1}")
+        Log.w(TAG, "buffering stalled > ${stallTimeoutMs}ms on ${ch.name} line ${streamIndex + 1}")
         failover(Failure(FailureKind.STALL))
     }
 
@@ -184,12 +187,12 @@ class PlayerController(
 
     private fun armStallTimer() {
         handler.removeCallbacks(stallRunnable)
-        handler.postDelayed(stallRunnable, STALL_TIMEOUT_MS)
+        handler.postDelayed(stallRunnable, stallTimeoutMs)
     }
 
     companion object {
         const val TAG = "LiveTv"
-        const val STALL_TIMEOUT_MS = 12_000L
+        const val DEFAULT_STALL_TIMEOUT_MS = 12_000L
         const val RETRY_DELAY_MS = 300L
     }
 }

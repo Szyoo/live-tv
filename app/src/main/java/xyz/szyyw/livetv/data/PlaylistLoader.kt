@@ -37,6 +37,9 @@ class PlaylistLoader(context: Context, private val client: OkHttpClient) {
         Loaded(builtin(), Source.FALLBACK_BUILTIN)
     }
 
+    /** 内置清单（阻塞，后台线程调用）。 */
+    fun loadBuiltin(): Playlist = builtin()
+
     private fun builtin(): Playlist =
         parseNonEmpty(assets.open(BUILTIN_ASSET).bufferedReader().use { it.readText() })
 
