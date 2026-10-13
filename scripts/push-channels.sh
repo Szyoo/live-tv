@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 把本地频道清单推送到电视上的 App（清单不进仓库，也不内置在 APK 里）。
 # 用法：push-channels.sh [设备地址] [清单文件]
-#   设备地址默认 192.0.2.10:5555（也可用 ANDROID_SERIAL 指定，模拟器 emulator-5554）
-#   清单文件默认 ./secrets/channels.m3u
+#   设备地址：第 1 个参数或环境变量 ANDROID_SERIAL，形如 <电视 IP>:5555（模拟器 emulator-5554）
+#   清单文件：第 2 个参数或环境变量 LIVETV_CHANNELS，默认当前目录的 channels.m3u（*.m3u 已被 .gitignore 忽略）
 set -euo pipefail
 
 PKG=xyz.szyyw.livetv
@@ -10,10 +10,12 @@ DEST_DIR=/sdcard/Android/data/$PKG/files
 DEST=$DEST_DIR/channels.m3u
 TMP=$DEST_DIR/channels.m3u.tmp
 
-DEVICE="${1:-${ANDROID_SERIAL:-192.0.2.10:5555}}"
-FILE="${2:-$HOME/secrets/channels.m3u}"
+DEVICE="${1:-${ANDROID_SERIAL:-}}"
+FILE="${2:-${LIVETV_CHANNELS:-./channels.m3u}}"
 
 die() { echo "错误：$*" >&2; exit 1; }
+
+[ -n "$DEVICE" ] || die "未指定设备：传第 1 个参数或设置 ANDROID_SERIAL（形如 设备IP:5555）"
 
 command -v adb >/dev/null 2>&1 || die "找不到 adb"
 [ -f "$FILE" ] || die "清单文件不存在：$FILE"

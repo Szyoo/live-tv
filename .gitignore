@@ -6,7 +6,7 @@ local.properties
 .kotlin/
 captures/
 
-# 频道清单与线路地址绝不进仓库（只放在本机 ./secrets/，用 scripts/push-channels.sh 推送）
+# 频道清单与线路地址绝不进仓库（只放在本机仓库之外，用 scripts/push-channels.sh 推送）
 *.m3u
 *.m3u8
 channels*.txt
