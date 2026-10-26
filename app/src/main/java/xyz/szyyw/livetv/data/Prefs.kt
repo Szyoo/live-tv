@@ -23,10 +23,11 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_LAST_CHANNEL, null)
         set(v) { sp.edit().putString(KEY_LAST_CHANNEL, v).apply() }
 
-    fun lineFor(channelName: String): Int = sp.getInt(KEY_LINE + channelName, 0)
+    /** 该频道上次使用的线路 URL（旧版本存的是下标，键名不同，直接忽略）。 */
+    fun lineFor(channelName: String): String? = sp.getString(KEY_LINE_URL + channelName, null)
 
-    fun setLine(channelName: String, index: Int) {
-        sp.edit().putInt(KEY_LINE + channelName, index).apply()
+    fun setLine(channelName: String, url: String) {
+        sp.edit().putString(KEY_LINE_URL + channelName, url).apply()
     }
 
     // ---------- 设置项（默认值 = 加设置页之前的行为） ----------
@@ -73,7 +74,7 @@ class Prefs(context: Context) {
     fun clearMemory() {
         val e = sp.edit()
         e.remove(KEY_LAST_CHANNEL)
-        sp.all.keys.filter { it.startsWith(KEY_LINE) }.forEach { e.remove(it) }
+        sp.all.keys.filter { it.startsWith(KEY_LINE) || it.startsWith(KEY_LINE_URL) }.forEach { e.remove(it) }
         e.apply()
         filesDir.listFiles { f -> f.name.startsWith("playlist-cache-") }?.forEach { it.delete() }
     }
@@ -82,5 +83,6 @@ class Prefs(context: Context) {
         const val KEY_SOURCE = "source_url"
         const val KEY_LAST_CHANNEL = "last_channel"
         const val KEY_LINE = "line_"
+        const val KEY_LINE_URL = "lineurl_"
     }
 }

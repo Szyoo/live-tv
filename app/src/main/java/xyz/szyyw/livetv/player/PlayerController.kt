@@ -18,6 +18,7 @@ import okhttp3.OkHttpClient
 import xyz.szyyw.livetv.data.PlaylistLoader
 import xyz.szyyw.livetv.logic.Failure
 import xyz.szyyw.livetv.logic.FailureKind
+import xyz.szyyw.livetv.logic.LineRank
 import xyz.szyyw.livetv.playlist.Channel
 
 /**
@@ -42,6 +43,9 @@ class PlayerController(
     /** 卡顿多久自动换线路（设置里可调，默认 12 秒）。 */
     @Volatile var stallTimeoutMs: Long = DEFAULT_STALL_TIMEOUT_MS
     private val handler = Handler(Looper.getMainLooper())
+
+    /** 某条线路（按 URL）是否已被测速判为失败：自动故障转移会先跳过它们。 */
+    @Volatile var isLineFailed: (String) -> Boolean = { false }
 
     private var channel: Channel? = null
     private var streamIndex = 0
@@ -118,6 +122,20 @@ class PlayerController(
         startCurrent()
     }
 
+    /** 测速结果改变了线路顺序：换成新顺序的频道视图，正在播放的线路继续播放（只更新序号），不重新起播。 */
+    fun updateOrder(view: Channel) {
+        val cur = channel ?: return
+        if (view.name != cur.name) return
+        val url = cur.streams.getOrNull(streamIndex)?.url ?: return
+        val i = view.streams.indexOfFirst { it.url == url }
+        if (i < 0) return
+        channel = view
+        streamIndex = i
+    }
+
+    /** 正在播放（或正在尝试）的线路在当前顺序里的下标；没有频道时为 -1。 */
+    val currentIndex: Int get() = if (channel == null) -1 else streamIndex
+
     fun release() {
         handler.removeCallbacksAndMessages(null)
         channel = null
@@ -144,7 +162,7 @@ class PlayerController(
             return
         }
         attempts++
-        if (attempts >= ch.streams.size) {
+        if (attempts >= LineRank.failoverLimit(ch.streams) { isLineFailed(it) }) {
             Log.e(TAG, "all ${ch.streams.size} streams failed for ${ch.name}: ${f.kind}")
             player.stop()
             listener.onLoading(false)
@@ -152,7 +170,7 @@ class PlayerController(
             listener.onAllFailed(ch, f)
             return
         }
-        streamIndex = (streamIndex + 1) % ch.streams.size
+        streamIndex = LineRank.nextCandidate(ch.streams, streamIndex) { isLineFailed(it) }
         hlsRetried = false
         forceHls = false
         Log.i(TAG, "failover -> ${ch.name} line ${streamIndex + 1}/${ch.streams.size} (attempt ${attempts + 1})")

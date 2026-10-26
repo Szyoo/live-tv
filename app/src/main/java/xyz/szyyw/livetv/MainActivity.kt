@@ -37,12 +37,15 @@ import xyz.szyyw.livetv.logic.Dir
 import xyz.szyyw.livetv.logic.ExitMode
 import xyz.szyyw.livetv.logic.Failure
 import xyz.szyyw.livetv.logic.HorizontalMode
+import xyz.szyyw.livetv.logic.LineRank
 import xyz.szyyw.livetv.logic.FileStamp
 import xyz.szyyw.livetv.logic.PlaylistSource
 import xyz.szyyw.livetv.logic.ResizeOption
 import xyz.szyyw.livetv.logic.Settings
 import xyz.szyyw.livetv.logic.StartMode
 import xyz.szyyw.livetv.logic.VerticalMode
+import xyz.szyyw.livetv.player.LineProber
+import xyz.szyyw.livetv.player.LineRanker
 import xyz.szyyw.livetv.player.MediaSessionHolder
 import xyz.szyyw.livetv.player.PlayerController
 import xyz.szyyw.livetv.playlist.Channel
@@ -71,6 +74,7 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private lateinit var spinner: ProgressBar
     private lateinit var statusText: TextView
     private lateinit var hintText: TextView
+    private lateinit var probeText: TextView
     private lateinit var overlay: View
     private lateinit var groupList: RecyclerView
     private lateinit var channelList: RecyclerView
@@ -90,7 +94,16 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private var controller: PlayerController? = null
     private var playlist: Playlist? = null
     private var current: Channel? = null
+    private var currentView: Channel? = null   // current 按测速排序后的线路视图
     private var currentLine = 0
+    private var rankInterval = LineRank.RERUN_INTERVAL_MS
+    private val ranker: LineRanker by lazy {
+        LineRanker(
+            probe = LineProber(client)::probe,
+            store = File(filesDir, "line-probes.json"),
+            onChanged = { handler.post(rankChangedRunnable) },
+        )
+    }
     private var loading = false
     private var reloadAfterLoad = false
     private var loadedUsesPushed = false
@@ -119,6 +132,13 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         infoBar.visibility = View.GONE
         if (prefs.clockMode != ClockMode.ALWAYS) clock.visibility = View.GONE
     }
+    private val rankChangedRunnable = Runnable { onRankChanged() }
+    private val rankTick = object : Runnable {
+        override fun run() {
+            maybeRank(false)
+            handler.postDelayed(this, rankInterval)
+        }
+    }
     private val hideHint = Runnable { hintText.visibility = View.GONE }
     private val closeOverlay = Runnable { hideOverlay() }
     private val numberPoll = object : Runnable {
@@ -132,7 +152,7 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         val i = pendingIdx ?: return@Runnable
         pendingIdx = null
         val ch = playlist?.channels?.getOrNull(i) ?: return@Runnable
-        playChannel(ch, prefs.lineFor(ch.name))
+        playChannel(ch)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -148,6 +168,7 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         spinner = findViewById(R.id.spinner)
         statusText = findViewById(R.id.status_text)
         hintText = findViewById(R.id.hint_text)
+        probeText = findViewById(R.id.probe_text)
         overlay = findViewById(R.id.overlay)
         settingsPanel = findViewById(R.id.settings_panel)
         settingsList = findViewById(R.id.settings_list)
@@ -195,6 +216,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     /** 仅 debug 构建：`--es source_url <url>` 覆盖已保存的源地址（用于自测）。 */
     private fun applyDebugIntent(i: Intent?): Boolean {
         if (!BuildConfig.DEBUG) return false
+        i?.getStringExtra("rank_interval_ms")?.toLongOrNull()?.let { rankInterval = it; Log.i(TAG, "debug: rank interval=${it}ms") }
+        i?.getStringExtra("rank_ttl_ms")?.toLongOrNull()?.let { ranker.ttlMs = it; Log.i(TAG, "debug: rank ttl=${it}ms") }
         i?.getStringExtra("update_url")?.let { debugUpdateUrl = it; Log.i(TAG, "debug: update url overridden") }
         val url = i?.getStringExtra("source_url") ?: return false
         Log.i(TAG, "debug: source url overridden")
@@ -210,17 +233,20 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             mediaSession = MediaSessionHolder(applicationContext, it.player)
         }
         applyResize()
+        controller?.isLineFailed = { ranker.isFailed(it) }
         ReloadReceiver.foregroundHook = { reloadPlaylist() }
         val pl = playlist
         if (pl == null) startUp()
         else if (pushedChanged()) { Log.i(TAG, "pushed playlist changed, reloading"); reloadPlaylist() }
-        else resume(pl)
+        else { resume(pl); handler.postDelayed(rankTick, 1000) }
     }
 
     override fun onStop() {
         super.onStop()
         ReloadReceiver.foregroundHook = null
         handler.removeCallbacksAndMessages(null)
+        ranker.cancelPending()
+        probeText.visibility = View.GONE
         pendingIdx = null
         numberInput.cancel()
         numberText.visibility = View.GONE
@@ -248,6 +274,7 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     override fun onDestroy() {
         super.onDestroy()
         io.shutdownNow()
+        ranker.shutdown()
         updater.close()
         updateExec.shutdownNow()
     }
@@ -280,7 +307,7 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
                         Toast.makeText(this, "自定义源加载失败，已改用推送的清单", Toast.LENGTH_LONG).show()
                     }
                     if (reloadAfterLoad) { reloadAfterLoad = false; reloadPlaylist() }
-                    else if (controller != null) resume(pl)
+                    else if (controller != null) { resume(pl); handler.removeCallbacks(rankTick); handler.postDelayed(rankTick, 1000) }
                 }.onFailure { e ->
                     playlist = null
                     loadedUsesPushed = false
@@ -309,24 +336,58 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         startUp()
     }
 
+    /** 开始后台测速。force = 忽略有效期全部重测；否则只测没有有效结果的线路，且受重测间隔限制。 */
+    private fun maybeRank(force: Boolean) {
+        val pl = playlist ?: return
+        if (!force && !LineRank.shouldRun(ranker.lastRunAt, System.currentTimeMillis(), rankInterval, ranker.interrupted)) return
+        ranker.start(pl.channels, current?.name, force)
+        onRankChanged()
+    }
+
+    /** 测速结果到来：重新排序，正在播放的线路继续播，只更新序号与提示。 */
+    private fun onRankChanged() {
+        val ch = current ?: return
+        val v = ranker.view(ch)
+        controller?.updateOrder(v)
+        currentView = v
+        val idx = controller?.currentIndex ?: -1
+        if (idx >= 0) currentLine = idx
+        val st = ranker.status(ch)
+        if (ranker.isRanked(ch) && st.running) {
+            probeText.text = "测速中 ${st.done}/${st.total}"
+            probeText.visibility = View.VISIBLE
+        } else {
+            probeText.visibility = View.GONE
+        }
+        if (infoBar.visibility == View.VISIBLE) infoSub.text = infoSubText(v, currentLine, false)
+    }
+
     private fun resume(pl: Playlist) {
         // 「指定频道」只在本次进程第一次起播时生效；之后回到前台/重新加载仍接着上次看的
         val wanted = if (!started && prefs.startMode == StartMode.FIXED) prefs.startChannel else prefs.lastChannel
         started = true
         val ch = pl.channels.firstOrNull { it.name == wanted } ?: pl.channels.firstOrNull { it.name == prefs.lastChannel } ?: pl.channels.first()
-        playChannel(ch, prefs.lineFor(ch.name))
+        playChannel(ch)
     }
 
     // ---------- 换台 / 换线 ----------
 
-    private fun playChannel(ch: Channel, line: Int) {
+    /** 起播线路：记忆的 URL 没被判失败就用它，否则排序后的第 1 条。 */
+    private fun startIndex(v: Channel): Int =
+        LineRank.pickStart(v.streams, prefs.lineFor(v.name)) { ranker.isFailed(it) }
+
+    private fun playChannel(ch: Channel) {
         current = ch
+        ranker.prioritize(ch.name)
+        val v = ranker.view(ch)
+        currentView = v
         pendingIdx = null
         handler.removeCallbacks(commitPending)
         statusText.visibility = View.GONE
         prefs.lastChannel = ch.name
         mediaSession?.setTitle(ch.name)
-        controller?.play(ch, line)
+        controller?.play(v, startIndex(v))
+        onRankChanged()
     }
 
     /** 连按只更新目标并显示信息条，停止 400ms 后才真正起播。 */
@@ -337,14 +398,14 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         val idx = ((base + delta) % n + n) % n
         pendingIdx = idx
         val ch = pl.channels[idx]
-        showInfo(ch, prefs.lineFor(ch.name), false)
+        ranker.view(ch).let { showInfo(it, startIndex(it), false) }
         handler.removeCallbacks(commitPending)
         handler.postDelayed(commitPending, 400)
     }
 
     private fun stepLine(delta: Int) {
         if (pendingIdx != null) { handler.removeCallbacks(commitPending); commitPending.run() }
-        val ch = current ?: return
+        val ch = currentView ?: return
         val c = controller ?: return
         statusText.visibility = View.GONE
         c.play(ch, (currentLine + delta + ch.streams.size) % ch.streams.size)
@@ -354,7 +415,7 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         val pl = playlist ?: return
         val ch = pl.channels.getOrNull(n - 1)
         if (ch == null) { showHint("没有 %d 号频道（共 %d 个）".format(n, pl.channels.size)); return }
-        playChannel(ch, prefs.lineFor(ch.name))
+        playChannel(ch)
     }
 
     private fun commitNumber(n: Int) {
@@ -516,7 +577,7 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private fun onChannelClick(pos: Int) {
         val ch = groupChannels.getOrNull(pos) ?: return
         hideOverlay()
-        playChannel(ch, prefs.lineFor(ch.name))
+        playChannel(ch)
     }
 
     private fun focusGroupColumn() {
@@ -571,7 +632,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             SItem("info", "换台后信息条显示", Settings.infoLabel(prefs.infoSeconds), true),
             SItem("clock", "右上角时钟", prefs.clockMode.label, true),
             SHeader("当前频道"),
-            SItem("line", "选择线路", if (cur == null) "无" else "线路 ${currentLine + 1}/${cur.streams.size}（${cur.name}）", false),
+            SItem("line", "选择线路", if (cur == null) "无" else "线路 ${currentLine + 1}/${currentView?.streams?.size ?: cur.streams.size}（${cur.name}）", false),
+            SItem("probe_now", "立即测速", "重新测试所有多线路频道的线路", false),
             SHeader("按键"),
             SItem("vertical", "上下键换台方向", prefs.verticalMode.label, true),
             SItem("horizontal", "左右键功能", prefs.horizontalMode.label, true),
@@ -647,6 +709,11 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             "info" -> { prefs.infoSeconds = Settings.cycle(Settings.INFO_OPTIONS, prefs.infoSeconds, d); Log.i(TAG, "settings: info=${prefs.infoSeconds}s") }
             "clock" -> { prefs.clockMode = Settings.cycle(prefs.clockMode, d); applyClockMode(); Log.i(TAG, "settings: clock=${prefs.clockMode}") }
             "line" -> pickLine()
+            "probe_now" -> {
+                Log.i(TAG, "settings: probe now")
+                maybeRank(true)
+                Toast.makeText(this, "已开始测速", Toast.LENGTH_SHORT).show()
+            }
             "vertical" -> { prefs.verticalMode = Settings.cycle(prefs.verticalMode, d); Log.i(TAG, "settings: vertical=${prefs.verticalMode}") }
             "horizontal" -> { prefs.horizontalMode = Settings.cycle(prefs.horizontalMode, d); Log.i(TAG, "settings: horizontal=${prefs.horizontalMode}") }
             "exit" -> { prefs.exitMode = Settings.cycle(prefs.exitMode, d); Log.i(TAG, "settings: exit=${prefs.exitMode}") }
@@ -755,11 +822,21 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
 
     private fun pickLine() {
         val ch = current ?: return
-        val items = ch.streams.indices.map { "线路 ${it + 1}" + if (it == currentLine) "（正在使用）" else "" }
-        showChoice("选择线路 · ${ch.name}", items, currentLine) { i ->
-            Log.i(TAG, "settings: pick line ${i + 1}/${ch.streams.size} of ${ch.name}")
+        val v = ranker.view(ch)
+        val now = System.currentTimeMillis()
+        val playing = controller?.currentIndex?.takeIf { it >= 0 } ?: currentLine
+        val items = v.streams.mapIndexed { i, s ->
+            val st = LineRank.statusLabel(ranker.entry(s.url), now, ranker.ttlMs)
+            "${i + 1} · $st · ${LineRank.hostOf(s.url)}" + if (i == playing) "（正在使用）" else ""
+        }
+        showChoice("选择线路 · ${ch.name}", items, playing) { i ->
+            Log.i(TAG, "settings: pick line ${i + 1}/${v.streams.size} of ${ch.name}")
             statusText.visibility = View.GONE
-            controller?.play(ch, i)   // 回调 onStreamChanged 会记忆该线路
+            // 测速可能在弹窗期间改了顺序：按 URL 找回所选线路
+            val url = v.streams[i].url
+            val nv = ranker.view(ch)
+            currentView = nv
+            controller?.play(nv, nv.streams.indexOfFirst { it.url == url }.coerceAtLeast(0))
             refreshSettings()
         }
     }
@@ -867,8 +944,9 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     // ---------- PlayerController.Listener ----------
 
     override fun onStreamChanged(channel: Channel, streamIndex: Int, automatic: Boolean) {
+        currentView = channel
         currentLine = streamIndex
-        prefs.setLine(channel.name, streamIndex)
+        prefs.setLine(channel.name, channel.streams[streamIndex].url)
         showInfo(channel, streamIndex, automatic)
     }
 
@@ -890,11 +968,23 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
 
     private fun showInfo(ch: Channel, line: Int, automatic: Boolean) {
         infoTitle.text = "%03d  %s".format(ch.number, ch.name)
-        infoSub.text = "${ch.group}  ·  线路 ${line + 1}/${ch.streams.size}" + if (automatic) "  (自动切换)" else ""
+        infoSub.text = infoSubText(ch, line, automatic)
         infoBar.visibility = View.VISIBLE
         if (prefs.clockMode != ClockMode.HIDDEN) clock.visibility = View.VISIBLE
         handler.removeCallbacks(hideInfo)
         if (prefs.infoSeconds > 0) handler.postDelayed(hideInfo, prefs.infoSeconds * 1000L)
+    }
+
+    private fun infoSubText(ch: Channel, line: Int, automatic: Boolean): String {
+        val sb = StringBuilder("${ch.group}  ·  线路 ${line + 1}/${ch.streams.size}")
+        if (ranker.isRanked(ch)) {
+            val st = ranker.status(ch)
+            if (st.running) sb.append("  ·  测速中 ${st.done}/${st.total}") else sb.append("  ·  可用 ${st.ok}")
+            val e = ch.streams.getOrNull(line)?.let { ranker.entry(it.url) }
+            if (e != null && e.ok) sb.append("  ·  ${LineRank.msLabel(e.millis)}")
+        }
+        if (automatic) sb.append("  (自动切换)")
+        return sb.toString()
     }
 
     private fun showStatus(msg: String) {

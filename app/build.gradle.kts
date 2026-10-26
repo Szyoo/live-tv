@@ -76,5 +76,6 @@ dependencies {
     implementation(libs.recyclerview)
 
     testImplementation(libs.junit)
+    testImplementation(libs.okhttp.mockwebserver)
     testImplementation("org.json:json:20240303")
 }
