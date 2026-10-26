@@ -37,6 +37,11 @@ import xyz.szyyw.livetv.logic.Dir
 import xyz.szyyw.livetv.logic.ExitMode
 import xyz.szyyw.livetv.logic.Failure
 import xyz.szyyw.livetv.logic.HorizontalMode
+import xyz.szyyw.livetv.logic.IdleLogic
+import xyz.szyyw.livetv.logic.ProxyLogic
+import xyz.szyyw.livetv.logic.ProxyMode
+import xyz.szyyw.livetv.logic.ProxyState
+import xyz.szyyw.livetv.logic.Route
 import xyz.szyyw.livetv.logic.LineRank
 import xyz.szyyw.livetv.logic.FileStamp
 import xyz.szyyw.livetv.logic.PlaylistSource
@@ -44,6 +49,7 @@ import xyz.szyyw.livetv.logic.ResizeOption
 import xyz.szyyw.livetv.logic.Settings
 import xyz.szyyw.livetv.logic.StartMode
 import xyz.szyyw.livetv.logic.VerticalMode
+import xyz.szyyw.livetv.net.ProxyManager
 import xyz.szyyw.livetv.player.LineProber
 import xyz.szyyw.livetv.player.LineRanker
 import xyz.szyyw.livetv.player.MediaSessionHolder
@@ -91,6 +97,21 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             .build()
     }
 
+    // 拉流代理：只有视频流与测速走它；更新检查、更新包、自定义清单下载仍用上面的直连 client
+    private val proxy: ProxyManager by lazy {
+        ProxyManager(getExternalFilesDir(null)?.let { File(it, ProxyLogic.FILE_NAME) }) { prefs.proxyMode }
+    }
+    private val streamClient: OkHttpClient by lazy { client.newBuilder().proxySelector(proxy.selector).build() }
+    private var appliedRoute: Route? = null
+    private var rankerTag = ProxyLogic.routeTag(Route.DIRECT)   // ranker 当前使用的结果所属通道
+    private var proxyRecheckMs = PROXY_RECHECK_MS
+
+    // 无操作自动停止
+    private var lastKeyAt = SystemClock.elapsedRealtime()
+    private var debugIdleMs = 0L
+    private var idleStopped = false
+    private var idleDialog: AlertDialog? = null
+
     private var controller: PlayerController? = null
     private var playlist: Playlist? = null
     private var current: Channel? = null
@@ -99,8 +120,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private var rankInterval = LineRank.RERUN_INTERVAL_MS
     private val ranker: LineRanker by lazy {
         LineRanker(
-            probe = LineProber(client)::probe,
-            store = File(filesDir, "line-probes.json"),
+            probe = LineProber(streamClient)::probe,
+            store = probeStore(proxy.route().also { rankerTag = ProxyLogic.routeTag(it) }),
             onChanged = { handler.post(rankChangedRunnable) },
         )
     }
@@ -131,6 +152,24 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private val hideInfo = Runnable {
         infoBar.visibility = View.GONE
         if (prefs.clockMode != ClockMode.ALWAYS) clock.visibility = View.GONE
+    }
+    private val idleCheck = object : Runnable {
+        override fun run() {
+            if (idleStopped) return
+            val th = idleThresholdMs()
+            val left = IdleLogic.remainingMs(SystemClock.elapsedRealtime(), lastKeyAt, th)
+            when {
+                th <= 0 -> {}
+                left <= 0 -> onIdleTimeout(th)
+                else -> handler.postDelayed(this, left)
+            }
+        }
+    }
+    private val proxyTick = object : Runnable {
+        override fun run() {
+            checkProxyAsync()
+            handler.postDelayed(this, proxyRecheckMs)
+        }
     }
     private val rankChangedRunnable = Runnable { onRankChanged() }
     private val rankTick = object : Runnable {
@@ -218,6 +257,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         if (!BuildConfig.DEBUG) return false
         i?.getStringExtra("rank_interval_ms")?.toLongOrNull()?.let { rankInterval = it; Log.i(TAG, "debug: rank interval=${it}ms") }
         i?.getStringExtra("rank_ttl_ms")?.toLongOrNull()?.let { ranker.ttlMs = it; Log.i(TAG, "debug: rank ttl=${it}ms") }
+        i?.getStringExtra("idle_stop_ms")?.toLongOrNull()?.let { debugIdleMs = it; scheduleIdle(); Log.i(TAG, "debug: idle stop=${it}ms") }
+        i?.getStringExtra("proxy_recheck_ms")?.toLongOrNull()?.let { proxyRecheckMs = it; Log.i(TAG, "debug: proxy recheck=${it}ms") }
         i?.getStringExtra("update_url")?.let { debugUpdateUrl = it; Log.i(TAG, "debug: update url overridden") }
         val url = i?.getStringExtra("source_url") ?: return false
         Log.i(TAG, "debug: source url overridden")
@@ -227,14 +268,34 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
 
     override fun onStart() {
         super.onStart()
-        controller = PlayerController(this, client, this).also {
+        controller = PlayerController(this, streamClient, this).also {
             it.stallTimeoutMs = prefs.stallSeconds * 1000L
             playerView.player = it.player
             mediaSession = MediaSessionHolder(applicationContext, it.player)
         }
         applyResize()
         controller?.isLineFailed = { ranker.isFailed(it) }
-        ReloadReceiver.foregroundHook = { reloadPlaylist() }
+        controller?.onLineFailed = ::onLineFailed
+        ReloadReceiver.foregroundHook = { onProxyFileMaybeChanged(); reloadPlaylist() }
+        // 回到前台：重新计时；代理文件有变化就重读，配置了代理先做一次握手检查再起播
+        lastKeyAt = SystemClock.elapsedRealtime()
+        idleStopped = false
+        scheduleIdle()
+        proxy.reloadIfChanged()
+        if (proxy.active) {
+            io.execute {
+                proxy.check()
+                handler.post { if (controller != null) { syncRoute(); proceedStart() } }
+            }
+        } else {
+            syncRoute()
+            proceedStart()
+        }
+    }
+
+    private fun proceedStart() {
+        handler.removeCallbacks(proxyTick)
+        if (proxy.configured) handler.postDelayed(proxyTick, proxyRecheckMs)
         val pl = playlist
         if (pl == null) startUp()
         else if (pushedChanged()) { Log.i(TAG, "pushed playlist changed, reloading"); reloadPlaylist() }
@@ -253,6 +314,9 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         hideOverlay()
         hideSettings()
         hintText.visibility = View.GONE
+        idleDialog?.let { it.setOnDismissListener(null); it.dismiss() }
+        idleDialog = null
+        idleStopped = false
         mediaSession?.release()
         mediaSession = null
         playerView.player = null
@@ -338,10 +402,161 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
 
     /** 开始后台测速。force = 忽略有效期全部重测；否则只测没有有效结果的线路，且受重测间隔限制。 */
     private fun maybeRank(force: Boolean) {
-        val pl = playlist ?: return
+        if (playlist == null || idleStopped) return
         if (!force && !LineRank.shouldRun(ranker.lastRunAt, System.currentTimeMillis(), rankInterval, ranker.interrupted)) return
+        if (!proxy.active) { doRank(force); return }
+        // 每次测速前先检查代理；通道变了就由 onRouteChanged 换通道并重测
+        io.execute {
+            proxy.check()
+            handler.post {
+                if (controller == null) return@post
+                if (proxy.route() != appliedRoute) onRouteChanged() else doRank(force)
+            }
+        }
+    }
+
+    private fun doRank(force: Boolean) {
+        val pl = playlist ?: return
+        if (idleStopped || proxy.route() == Route.BLOCKED) return
         ranker.start(pl.channels, current?.name, force)
         onRankChanged()
+    }
+
+    // ---------- 拉流代理 ----------
+
+    private fun probeStore(route: Route) =
+        File(filesDir, if (route == Route.DIRECT) "line-probes.json" else "line-probes-proxy.json")
+
+    /** 让测速结果跟着当前通道走（直连 / 代理各存各的），并记下当前通道。 */
+    private fun syncRoute() {
+        val r = proxy.route()
+        val tag = ProxyLogic.routeTag(r)
+        if (tag != rankerTag) { ranker.switchRoute(probeStore(r)); rankerTag = tag }
+        appliedRoute = r
+    }
+
+    /** 通道变了：换测速结果、无缝重新起播当前台、重测，并提示。 */
+    private fun onRouteChanged() {
+        val old = appliedRoute
+        val r = proxy.route()
+        if (old == r) { refreshSettingsIfOpen(); return }
+        Log.i(TAG, "route: $old -> $r")
+        syncRoute()
+        when (proxy.state()) {
+            ProxyState.FALLBACK_DIRECT -> showHint("代理不可用，已直连", 4000)
+            ProxyState.BLOCKED -> showHint("代理不可用", 4000)
+            ProxyState.IN_USE -> showHint("已使用代理", 3000)
+            else -> {}
+        }
+        if (!idleStopped) {
+            current?.let { playChannel(it) }
+            doRank(false)
+        }
+        refreshSettingsIfOpen()
+    }
+
+    private fun refreshSettingsIfOpen() { if (settingsPanel.visibility == View.VISIBLE) refreshSettings() }
+
+    private fun checkProxyAsync() {
+        if (!proxy.active || idleStopped) return
+        io.execute {
+            proxy.check()
+            handler.post { if (controller != null) onRouteChanged() }
+        }
+    }
+
+    /** 推送脚本新推了代理文件（或模式改变）：重读、检查、必要时换通道。 */
+    private fun onProxyFileMaybeChanged() {
+        io.execute {
+            proxy.reloadIfChanged()
+            if (proxy.active) proxy.check()
+            handler.post {
+                if (controller == null) return@post
+                onRouteChanged()
+                handler.removeCallbacks(proxyTick)
+                if (proxy.configured) handler.postDelayed(proxyTick, proxyRecheckMs)
+            }
+        }
+    }
+
+    /** 线路播放失败：走代理时怀疑代理断了，复查一次（5 秒内不重复）。 */
+    private fun onLineFailed() {
+        if (proxy.route() != Route.PROXY || System.currentTimeMillis() - proxy.lastCheckAt < 5_000) return
+        checkProxyAsync()
+    }
+
+    private fun proxyStatusText(): String = "${prefs.proxyMode.label} · ${proxy.state().label}"
+
+    private fun testProxy() {
+        if (!proxy.configured) {
+            showMessage("测试代理", "未配置代理。\n代理由电脑上的推送脚本推送，不在遥控器上设置。")
+            return
+        }
+        Toast.makeText(this, "正在测试代理…", Toast.LENGTH_SHORT).show()
+        io.execute {
+            val r = proxy.test()
+            if (r != null) proxy.applyResult(r.ok)
+            Log.i(TAG, "proxy test: ${if (r?.ok == true) "ok ${r.millis}ms" else "fail ${r?.reason}"}")
+            handler.post {
+                if (isFinishing || isDestroyed || controller == null) return@post
+                if (r != null && r.ok) showMessage("测试代理", "代理正常（${r.millis} ms）")
+                else showMessage("测试代理", "连接不上代理：${r?.reason ?: "未配置"}")
+                onRouteChanged()
+            }
+        }
+    }
+
+    // ---------- 无操作自动停止 ----------
+
+    private fun idleThresholdMs() = IdleLogic.thresholdMs(prefs.idleHours, debugIdleMs)
+
+    /** 按当前阈值重新排一次检查（设置改变、回前台、调试参数时调用）。 */
+    private fun scheduleIdle() {
+        handler.removeCallbacks(idleCheck)
+        if (idleStopped || !::prefs.isInitialized) return
+        val th = idleThresholdMs()
+        if (th <= 0) return
+        handler.postDelayed(idleCheck, IdleLogic.remainingMs(SystemClock.elapsedRealtime(), lastKeyAt, th).coerceAtLeast(1))
+    }
+
+    private fun onIdleTimeout(thresholdMs: Long) {
+        if (idleStopped) return
+        idleStopped = true
+        Log.i(TAG, "idle stop: no key for ${thresholdMs}ms, stopping playback")
+        handler.removeCallbacks(commitPending); pendingIdx = null
+        handler.removeCallbacks(rankTick)
+        handler.removeCallbacks(proxyTick)
+        ranker.cancelPending()
+        probeText.visibility = View.GONE
+        controller?.pause()
+        spinner.visibility = View.GONE
+        hideOverlay(); hideSettings()
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("已暂停播放")
+            .setMessage("已连续 ${IdleLogic.durationLabel(thresholdMs)}无操作，为节省流量已暂停播放。按任意键继续。")
+            .setPositiveButton("继续观看", null)
+            .setOnKeyListener { d, _, e ->
+                if (e.action == KeyEvent.ACTION_DOWN) { d.dismiss(); true } else false
+            }
+            .create()
+        dlg.setOnDismissListener { idleDialog = null; resumeAfterIdle() }
+        idleDialog = dlg
+        dlg.show()
+        dlg.getButton(AlertDialog.BUTTON_POSITIVE).requestFocus()
+    }
+
+    private fun resumeAfterIdle() {
+        if (!idleStopped) return
+        idleStopped = false
+        lastKeyAt = SystemClock.elapsedRealtime()
+        scheduleIdle()
+        Log.i(TAG, "idle stop: resumed")
+        if (controller == null) return
+        val ch = current ?: playlist?.channels?.firstOrNull()
+        if (ch != null) playChannel(ch)
+        handler.removeCallbacks(proxyTick)
+        if (proxy.configured) handler.postDelayed(proxyTick, proxyRecheckMs)
+        handler.removeCallbacks(rankTick); handler.postDelayed(rankTick, 1000)
     }
 
     /** 测速结果到来：重新排序，正在播放的线路继续播，只更新序号与提示。 */
@@ -386,8 +601,21 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         statusText.visibility = View.GONE
         prefs.lastChannel = ch.name
         mediaSession?.setTitle(ch.name)
-        controller?.play(v, startIndex(v))
+        playVia(v, startIndex(v))
         onRankChanged()
+    }
+
+    /** 起播：代理被设为「始终使用」却不可用时不回退直连，直接提示。 */
+    private fun playVia(v: Channel, idx: Int) {
+        if (proxy.route() == Route.BLOCKED) {
+            controller?.pause()
+            spinner.visibility = View.GONE
+            showInfo(v, idx, false)
+            showStatus("代理不可用（已设为「始终使用」，不会改用直连）\n代理恢复后会自动重试；可在设置里把「拉流代理」改成「自动」")
+            Log.w(TAG, "play blocked: proxy unavailable in ALWAYS mode")
+            return
+        }
+        controller?.play(v, idx)
     }
 
     /** 连按只更新目标并显示信息条，停止 400ms 后才真正起播。 */
@@ -406,9 +634,9 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private fun stepLine(delta: Int) {
         if (pendingIdx != null) { handler.removeCallbacks(commitPending); commitPending.run() }
         val ch = currentView ?: return
-        val c = controller ?: return
+        if (controller == null) return
         statusText.visibility = View.GONE
-        c.play(ch, (currentLine + delta + ch.streams.size) % ch.streams.size)
+        playVia(ch, (currentLine + delta + ch.streams.size) % ch.streams.size)
     }
 
     private fun jumpToNumber(n: Int) {
@@ -426,6 +654,7 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     // ---------- 按键 ----------
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        lastKeyAt = SystemClock.elapsedRealtime()
         if (overlay.visibility == View.VISIBLE) {
             handler.removeCallbacks(closeOverlay)
             handler.postDelayed(closeOverlay, OVERLAY_TIMEOUT_MS)
@@ -631,9 +860,13 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             SItem("stall", "卡顿多久自动换线路", Settings.stallLabel(prefs.stallSeconds), true),
             SItem("info", "换台后信息条显示", Settings.infoLabel(prefs.infoSeconds), true),
             SItem("clock", "右上角时钟", prefs.clockMode.label, true),
+            SItem("idle", "无操作自动停止", IdleLogic.hoursLabel(prefs.idleHours), true),
             SHeader("当前频道"),
             SItem("line", "选择线路", if (cur == null) "无" else "线路 ${currentLine + 1}/${currentView?.streams?.size ?: cur.streams.size}（${cur.name}）", false),
             SItem("probe_now", "立即测速", "重新测试所有多线路频道的线路", false),
+            SHeader("网络"),
+            SItem("proxy", "拉流代理", proxyStatusText(), true),
+            SItem("proxy_test", "测试代理", if (proxy.configured) "已配置" else "未配置", false),
             SHeader("按键"),
             SItem("vertical", "上下键换台方向", prefs.verticalMode.label, true),
             SItem("horizontal", "左右键功能", prefs.horizontalMode.label, true),
@@ -708,6 +941,18 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             }
             "info" -> { prefs.infoSeconds = Settings.cycle(Settings.INFO_OPTIONS, prefs.infoSeconds, d); Log.i(TAG, "settings: info=${prefs.infoSeconds}s") }
             "clock" -> { prefs.clockMode = Settings.cycle(prefs.clockMode, d); applyClockMode(); Log.i(TAG, "settings: clock=${prefs.clockMode}") }
+            "idle" -> {
+                prefs.idleHours = Settings.cycle(IdleLogic.HOUR_OPTIONS, prefs.idleHours, d)
+                lastKeyAt = SystemClock.elapsedRealtime()
+                scheduleIdle()
+                Log.i(TAG, "settings: idle stop=${prefs.idleHours}h")
+            }
+            "proxy" -> {
+                prefs.proxyMode = Settings.cycle(prefs.proxyMode, d)
+                Log.i(TAG, "settings: proxy mode=${prefs.proxyMode}")
+                onProxyFileMaybeChanged()
+            }
+            "proxy_test" -> testProxy()
             "line" -> pickLine()
             "probe_now" -> {
                 Log.i(TAG, "settings: probe now")
@@ -829,14 +1074,14 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             val st = LineRank.statusLabel(ranker.entry(s.url), now, ranker.ttlMs)
             "${i + 1} · $st · ${LineRank.hostOf(s.url)}" + if (i == playing) "（正在使用）" else ""
         }
-        showChoice("选择线路 · ${ch.name}", items, playing) { i ->
+        showChoice("选择线路 · ${ch.name}${routeSuffix()}", items, playing) { i ->
             Log.i(TAG, "settings: pick line ${i + 1}/${v.streams.size} of ${ch.name}")
             statusText.visibility = View.GONE
             // 测速可能在弹窗期间改了顺序：按 URL 找回所选线路
             val url = v.streams[i].url
             val nv = ranker.view(ch)
             currentView = nv
-            controller?.play(nv, nv.streams.indexOfFirst { it.url == url }.coerceAtLeast(0))
+            playVia(nv, nv.streams.indexOfFirst { it.url == url }.coerceAtLeast(0))
             refreshSettings()
         }
     }
@@ -983,9 +1228,19 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             val e = ch.streams.getOrNull(line)?.let { ranker.entry(it.url) }
             if (e != null && e.ok) sb.append("  ·  ${LineRank.msLabel(e.millis)}")
         }
+        when (proxy.state()) {
+            ProxyState.IN_USE -> sb.append("  ·  代理")
+            ProxyState.FALLBACK_DIRECT -> sb.append("  ·  代理不可用，已直连")
+            ProxyState.BLOCKED -> sb.append("  ·  代理不可用")
+            else -> {}
+        }
         if (automatic) sb.append("  (自动切换)")
         return sb.toString()
     }
+
+    /** 线路弹窗标题里的通道小标记：只在配置了代理且没关闭时显示。 */
+    private fun routeSuffix(): String =
+        if (proxy.active) " [${ProxyLogic.routeMark(proxy.route())}]" else ""
 
     private fun showStatus(msg: String) {
         statusText.text = msg
@@ -1002,6 +1257,7 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private companion object {
         const val TAG = "LiveTv"
         const val OVERLAY_TIMEOUT_MS = 8000L
+        const val PROXY_RECHECK_MS = 3 * 60_000L
         val KEY_HELP = """播放画面：
 上 / 下：换台（方向可在设置里对调）
 左 / 右：换线路（可在设置里改成换台）

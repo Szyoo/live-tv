@@ -149,4 +149,30 @@ class LineRankerTest {
         assertTrue(LineRank.shouldRun(r.lastRunAt, System.currentTimeMillis(), LineRank.RERUN_INTERVAL_MS, r.interrupted))
         gate.countDown(); waitIdle(r); r.shutdown()
     }
+
+    @Test fun switchRouteKeepsResultsPerRouteAndDropsStaleInFlight() {
+        val direct = File.createTempFile("probes-d", ".json").apply { deleteOnExit() }
+        val viaProxy = File.createTempFile("probes-p", ".json").apply { deleteOnExit() }
+        val gate = CountDownLatch(1)
+        var slow = true
+        val r = LineRanker({ s ->
+            if (slow && s.url.endsWith("/1")) gate.await(3, TimeUnit.SECONDS)
+            Probe(true, if (slow) 111 else 222)
+        }, direct, maxTotal = 4)
+        val c = ch("big", 10)
+        r.start(listOf(c), null)
+        Thread.sleep(100)
+        // 第 1 条还卡在旧通道上；此时换通道
+        slow = false
+        r.switchRoute(viaProxy)
+        assertNull(r.entry(c.streams[0].url))               // 旧通道的结果不带过来
+        gate.countDown()
+        Thread.sleep(150)
+        assertNull(r.entry(c.streams[0].url))               // 卡住那条后来才返回，也要作废
+        r.start(listOf(c), null); waitIdle(r)
+        assertEquals(222L, r.entry(c.streams[0].url)?.millis)
+        r.switchRoute(direct)                                // 切回直连：直连当时保存的结果仍在
+        assertNull(r.entry(c.streams[0].url))                // 直连时只有少数几条测完，第 1 条没有
+        r.shutdown()
+    }
 }

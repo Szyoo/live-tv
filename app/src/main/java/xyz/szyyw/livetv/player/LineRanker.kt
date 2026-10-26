@@ -26,14 +26,17 @@ data class RankStatus(val running: Boolean, val done: Int, val total: Int, val o
  */
 class LineRanker(
     private val probe: (Stream) -> Probe,
-    private val store: File?,
+    store: File?,
     private val clock: () -> Long = System::currentTimeMillis,
     @Volatile var ttlMs: Long = LineRank.TTL_MS,
     maxTotal: Int = 8,
     perHost: Int = 2,
     private val onChanged: () -> Unit = {},
 ) {
-    private class Task(val channel: String, val stream: Stream, val host: String)
+    private class Task(val channel: String, val stream: Stream, val host: String, val gen: Int)
+
+    private var store: File? = store
+    private var gen = 0   // 通道切换一次加一；旧通道上还在测的任务结果作废
 
     private val lock = Any()
     private val results = HashMap<String, ProbeEntry>()
@@ -115,7 +118,7 @@ class LineRanker(
                     if (s.url in queued) continue
                     if (!force && LineRank.isFresh(results[s.url], now, ttlMs)) continue
                     queued.add(s.url)
-                    pending.add(Task(ch.name, s, LineRank.hostOf(s.url)))
+                    pending.add(Task(ch.name, s, LineRank.hostOf(s.url), gen))
                     perChannel.merge(ch.name, 1, Int::plus)
                     added++
                 }
@@ -148,6 +151,26 @@ class LineRanker(
             pending.clear()
             interrupted = true
         }
+    }
+
+    /**
+     * 测速通道变了（直连 <-> 代理）：保存旧通道的结果，换成新通道自己的结果文件，
+     * 丢掉排队中的任务；旧通道上还在测的任务结果作废。之后调用 [start] 重测。
+     */
+    fun switchRoute(newStore: File?) {
+        synchronized(lock) {
+            saveLocked()
+            pending.clear()
+            queued.clear()
+            remaining.clear(); totals.clear(); dones.clear()
+            results.clear()
+            store = newStore
+            gen++
+            lastRunAt = 0L
+            interrupted = false
+            load()
+        }
+        onChanged()
     }
 
     fun shutdown() {
@@ -202,6 +225,7 @@ class LineRanker(
     private fun finishLocked(t: Task, e: ProbeEntry?) {
         limiter.release(t.host)
         inFlight--
+        if (t.gen != gen) return // 通道已切换：旧通道的结果不要
         queued.remove(t.stream.url)
         if (e != null) {
             results[t.stream.url] = e

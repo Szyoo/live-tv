@@ -4,6 +4,8 @@ import android.content.Context
 import xyz.szyyw.livetv.logic.ClockMode
 import xyz.szyyw.livetv.logic.ExitMode
 import xyz.szyyw.livetv.logic.HorizontalMode
+import xyz.szyyw.livetv.logic.IdleLogic
+import xyz.szyyw.livetv.logic.ProxyMode
 import xyz.szyyw.livetv.logic.ResizeOption
 import xyz.szyyw.livetv.logic.Settings
 import xyz.szyyw.livetv.logic.StartMode
@@ -69,6 +71,16 @@ class Prefs(context: Context) {
     var exitMode: ExitMode
         get() = Settings.parse(sp.getString("exit_mode", null), ExitMode.DOUBLE_BACK)
         set(v) { sp.edit().putString("exit_mode", v.name).apply() }
+
+    /** 拉流代理档位：自动 / 始终使用 / 关闭。 */
+    var proxyMode: ProxyMode
+        get() = Settings.parse(sp.getString("proxy_mode", null), ProxyMode.AUTO)
+        set(v) { sp.edit().putString("proxy_mode", v.name).apply() }
+
+    /** 无操作自动停止的小时数；0 = 关。 */
+    var idleHours: Int
+        get() = sp.getInt("idle_hours", IdleLogic.DEFAULT_HOURS)
+        set(v) { sp.edit().putInt("idle_hours", v).apply() }
 
     /** 清除记忆：上次频道、每台线路记忆、自定义源缓存文件。设置项与源地址本身保留。 */
     fun clearMemory() {

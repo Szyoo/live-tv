@@ -47,6 +47,9 @@ class PlayerController(
     /** 某条线路（按 URL）是否已被测速判为失败：自动故障转移会先跳过它们。 */
     @Volatile var isLineFailed: (String) -> Boolean = { false }
 
+    /** 某条线路播放失败、准备换线路时回调（主线程）；用于怀疑代理中断时复查。 */
+    @Volatile var onLineFailed: () -> Unit = {}
+
     private var channel: Channel? = null
     private var streamIndex = 0
     private var attempts = 0
@@ -152,6 +155,7 @@ class PlayerController(
         val ch = channel ?: return
         handler.removeCallbacks(stallRunnable)
         lastFailure = f
+        onLineFailed()
         // 无后缀 HLS：渐进式识别失败时，同一条线路改按 HLS 再试一次（不计入失败次数）
         if (f.kind == FailureKind.FORMAT && !currentIsHls && !hlsRetried) {
             hlsRetried = true
