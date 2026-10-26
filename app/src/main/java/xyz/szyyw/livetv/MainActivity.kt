@@ -146,6 +146,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private var groups: List<String> = emptyList()
     private var selectedGroup = 0
     private var groupChannels: List<Channel> = emptyList()
+    /** 打开浮层期间系统会把焦点还原到上次的分组行，此时的焦点变化不能当作用户切换分组。 */
+    private var suppressGroupFocus = false
     private lateinit var groupAdapter: RowAdapter
     private lateinit var channelAdapter: RowAdapter
 
@@ -776,7 +778,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         handler.removeCallbacks(closeOverlay)
         handler.postDelayed(closeOverlay, OVERLAY_TIMEOUT_MS)
         val pos = groupChannels.indexOfFirst { it.number == cur.number }.coerceAtLeast(0)
-        channelList.focusRow(pos)
+        suppressGroupFocus = true
+        channelList.focusRow(pos) { suppressGroupFocus = false }
     }
 
     private fun hideOverlay() {
@@ -796,7 +799,7 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     }
 
     private fun onGroupFocus(pos: Int) {
-        if (pos < groups.size && pos != selectedGroup) selectGroup(pos)
+        if (!suppressGroupFocus && pos < groups.size && pos != selectedGroup) selectGroup(pos)
     }
 
     private fun onGroupClick(pos: Int) {

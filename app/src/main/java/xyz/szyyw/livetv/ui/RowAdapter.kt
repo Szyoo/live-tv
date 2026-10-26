@@ -47,11 +47,13 @@ class RowAdapter(
 }
 
 /** 滚动到 pos 并把焦点放上去（行可能尚未布局，延迟重试）。 */
-fun RecyclerView.focusRow(pos: Int, tries: Int = 6) {
+fun RecyclerView.focusRow(pos: Int, tries: Int = 6, onDone: (() -> Unit)? = null) {
     val lm = layoutManager as LinearLayoutManager
     lm.scrollToPositionWithOffset(pos, (resources.displayMetrics.density * 160).toInt())
     post {
         val v = findViewHolderForAdapterPosition(pos)?.itemView
-        if (v != null) v.requestFocus() else if (tries > 0) postDelayed({ focusRow(pos, tries - 1) }, 50)
+        if (v != null) { v.requestFocus(); onDone?.invoke() }
+        else if (tries > 0) postDelayed({ focusRow(pos, tries - 1, onDone) }, 50)
+        else onDone?.invoke()
     }
 }
