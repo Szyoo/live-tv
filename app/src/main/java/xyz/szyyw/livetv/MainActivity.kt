@@ -49,6 +49,7 @@ import xyz.szyyw.livetv.logic.ResizeOption
 import xyz.szyyw.livetv.logic.Settings
 import xyz.szyyw.livetv.logic.StartMode
 import xyz.szyyw.livetv.logic.VerticalMode
+import xyz.szyyw.livetv.net.ProxyAuth
 import xyz.szyyw.livetv.net.ProxyManager
 import xyz.szyyw.livetv.player.LineProber
 import xyz.szyyw.livetv.player.LineRanker
@@ -101,7 +102,10 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
     private val proxy: ProxyManager by lazy {
         ProxyManager(getExternalFilesDir(null)?.let { File(it, ProxyLogic.FILE_NAME) }) { prefs.proxyMode }
     }
-    private val streamClient: OkHttpClient by lazy { client.newBuilder().proxySelector(proxy.selector).build() }
+    private val streamClient: OkHttpClient by lazy {
+        ProxyAuth.install { proxy.address }
+        client.newBuilder().proxySelector(proxy.selector).build()
+    }
     private var appliedRoute: Route? = null
     private var rankerTag = ProxyLogic.routeTag(Route.DIRECT)   // ranker 当前使用的结果所属通道
     private var proxyRecheckMs = PROXY_RECHECK_MS
@@ -447,6 +451,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         when (proxy.state()) {
             ProxyState.FALLBACK_DIRECT -> showHint("代理不可用，已直连", 4000)
             ProxyState.BLOCKED -> showHint("代理不可用", 4000)
+            ProxyState.AUTH_FAILED_DIRECT -> showHint("代理认证失败，已直连", 4000)
+            ProxyState.AUTH_FAILED_BLOCKED -> showHint("代理认证失败", 4000)
             ProxyState.IN_USE -> showHint("已使用代理", 3000)
             else -> {}
         }
@@ -497,11 +503,12 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
         Toast.makeText(this, "正在测试代理…", Toast.LENGTH_SHORT).show()
         io.execute {
             val r = proxy.test()
-            if (r != null) proxy.applyResult(r.ok)
+            if (r != null) proxy.applyResult(r.ok, r.authFailed)
             Log.i(TAG, "proxy test: ${if (r?.ok == true) "ok ${r.millis}ms" else "fail ${r?.reason}"}")
             handler.post {
                 if (isFinishing || isDestroyed || controller == null) return@post
                 if (r != null && r.ok) showMessage("测试代理", "代理正常（${r.millis} ms）")
+                else if (r != null && r.authFailed) showMessage("测试代理", "代理认证失败\n${r.reason}。请检查电脑上推送的代理文件里的用户名和密码。")
                 else showMessage("测试代理", "连接不上代理：${r?.reason ?: "未配置"}")
                 onRouteChanged()
             }
@@ -613,7 +620,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             controller?.pause()
             spinner.visibility = View.GONE
             showInfo(v, idx, false)
-            showStatus("代理不可用（已设为「始终使用」，不会改用直连）\n代理恢复后会自动重试；可在设置里把「拉流代理」改成「自动」")
+            if (proxy.authFailed) showStatus("代理认证失败（已设为「始终使用」，不会改用直连）\n请检查电脑上推送的代理文件里的用户名和密码；也可在设置里把「拉流代理」改成「自动」")
+            else showStatus("代理不可用（已设为「始终使用」，不会改用直连）\n代理恢复后会自动重试；可在设置里把「拉流代理」改成「自动」")
             Log.w(TAG, "play blocked: proxy unavailable in ALWAYS mode")
             return
         }
@@ -1235,6 +1243,8 @@ class MainActivity : AppCompatActivity(), PlayerController.Listener {
             ProxyState.IN_USE -> sb.append("  ·  代理")
             ProxyState.FALLBACK_DIRECT -> sb.append("  ·  代理不可用，已直连")
             ProxyState.BLOCKED -> sb.append("  ·  代理不可用")
+            ProxyState.AUTH_FAILED_DIRECT -> sb.append("  ·  代理认证失败，已直连")
+            ProxyState.AUTH_FAILED_BLOCKED -> sb.append("  ·  代理认证失败")
             else -> {}
         }
         if (automatic) sb.append("  (自动切换)")

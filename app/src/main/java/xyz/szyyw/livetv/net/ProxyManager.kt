@@ -25,6 +25,9 @@ class ProxyManager(private val file: File?, private val mode: () -> ProxyMode) {
         private set
     private var stamp: FileStamp? = null
     @Volatile private var reachable = true
+    /** 最近一次检查失败是因为认证（而不是连不上）。 */
+    @Volatile var authFailed = false
+        private set
     @Volatile var lastCheckAt = 0L
         private set
 
@@ -32,7 +35,7 @@ class ProxyManager(private val file: File?, private val mode: () -> ProxyMode) {
     /** 配置了代理且没有被设为「关闭」。 */
     val active: Boolean get() = configured && mode() != ProxyMode.OFF
     fun route(): Route = ProxyLogic.route(mode(), configured, reachable)
-    fun state(): ProxyState = ProxyLogic.state(mode(), configured, reachable)
+    fun state(): ProxyState = ProxyLogic.state(mode(), configured, reachable, authFailed)
 
     /** 重读 proxy.txt（文件修改时间或大小变了才读）。返回配置是否变化。 */
     @Synchronized
@@ -44,6 +47,7 @@ class ProxyManager(private val file: File?, private val mode: () -> ProxyMode) {
         val before = address
         address = if (now == null) null else runCatching { ProxyLogic.parse(f!!.readText()) }.getOrNull()
         reachable = true
+        authFailed = false
         lastCheckAt = 0L
         Log.i(TAG, "proxy file: ${if (address == null) (if (now == null) "absent" else "invalid") else "configured"}")
         return before != address
@@ -56,14 +60,16 @@ class ProxyManager(private val file: File?, private val mode: () -> ProxyMode) {
         val r = Socks5.handshake(a)
         lastCheckAt = System.currentTimeMillis()
         reachable = r.ok
+        authFailed = r.authFailed
         Log.i(TAG, "proxy check: ${if (r.ok) "ok ${r.millis}ms" else "fail ${r.reason}"} route=${route()}")
         return route() != before
     }
 
     /** 用外部得到的连通结果更新可达状态（如「测试代理」）。返回通道是否因此改变。 */
-    fun applyResult(ok: Boolean): Boolean {
+    fun applyResult(ok: Boolean, authFailed: Boolean = false): Boolean {
         val before = route()
         reachable = ok
+        this.authFailed = authFailed
         lastCheckAt = System.currentTimeMillis()
         return route() != before
     }

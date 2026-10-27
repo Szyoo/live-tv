@@ -3,8 +3,8 @@
 # 用法：push-channels.sh [设备地址] [清单文件] [代理文件]
 #   设备地址：第 1 个参数或环境变量 ANDROID_SERIAL，形如 <电视 IP>:5555（模拟器 emulator-5554）
 #   清单文件：第 2 个参数或环境变量 LIVETV_CHANNELS，默认当前目录的 channels.m3u（*.m3u 已被 .gitignore 忽略）
-#   代理文件（可选）：第 3 个参数或环境变量 LIVETV_PROXY，不设就不推送。单行 socks5://主机:端口，
-#     空行和 # 开头的行忽略；推送后 App 的「拉流代理」才有可用的代理。代理地址不进仓库，脚本也不会打印它。
+#   代理文件（可选）：第 3 个参数或环境变量 LIVETV_PROXY，不设就不推送。单行 socks5://[用户名:密码@]主机:端口（密码里的 @ : / 等写成 %40 %3A %2F），
+#     空行和 # 开头的行忽略；推送后 App 的「拉流代理」才有可用的代理。代理地址和用户名密码不进仓库，脚本也不会打印文件内容。
 set -euo pipefail
 
 PKG=xyz.szyyw.livetv
@@ -50,8 +50,8 @@ if [ -n "$PROXY_FILE" ]; then
   if [ ! -f "$PROXY_FILE" ]; then
     echo "警告：代理文件不存在，已跳过：$PROXY_FILE" >&2
   else
-    grep -Eqi '^[[:space:]]*socks5h?://[^[:space:]]+:[0-9]+[[:space:]]*$' "$PROXY_FILE" \
-      || echo "警告：代理文件里没有形如 socks5://主机:端口 的行，App 会把它当作未配置" >&2
+    grep -Eqi '^[[:space:]]*socks5h?://([^[:space:]@/]+@)?[^[:space:]@]+:[0-9]+/?[[:space:]]*$' "$PROXY_FILE" \
+      || echo "警告：代理文件里没有形如 socks5://[用户名:密码@]主机:端口 的行，App 会把它当作未配置" >&2
     A push "$PROXY_FILE" "$PROXY_TMP" >/dev/null
     A shell mv -f "$PROXY_TMP" "$PROXY_DEST"
     PROXY_MSG="已推送代理文件"
